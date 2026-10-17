@@ -9,6 +9,7 @@ if ffmpeg_dir not in os.environ["PATH"]:
 
 from video_processor import VideoProcessor
 from speech_to_text import LectureTranscriber
+from extractor import BoardExtractor
 
 
 def run_pipeline(
@@ -61,6 +62,13 @@ def run_pipeline(
         target_fps=target_fps,
         max_width=1280
     )
+
+# Step 4: Establish Whiteboard Region of Interest (ROI) with multi-sample check
+    print("\n[4/4] Establishing automatic whiteboard bounding box (scanning start & 1 min mark)...")
+    extractor = BoardExtractor(video_path=str(norm_video_file))
+    # Samples at 2 seconds in and 60 seconds in to bypass title cards/intros
+    board_bounds = extractor.detect_board_automatically(sample_timestamps_sec=[2.0, 60.0])
+    print(f"    - Active Board ROI Coordinates (xmin, ymin, xmax, ymax): {board_bounds}")
 
     print("\n" + "=" * 60)
     print("[+] PIPELINE COMPLETE!")
