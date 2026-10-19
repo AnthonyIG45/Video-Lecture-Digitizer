@@ -3,24 +3,23 @@ import numpy as np
 from pathlib import Path
 
 class BoardExtractor:
-    """Handles automatic whiteboard/screen region-of-interest (ROI) detection and cropping."""
+    """Handles automatic whiteboard region-of-interest (ROI) detection and motion-settled keyframe extraction."""
 
     def __init__(self, video_path: str):
         self.video_path = Path(video_path)
-        self.roi_bbox = None  # Stores (xmin, ymin, xmax, ymax) once computed
+        self.roi_bbox = None
 
     def detect_board_automatically(self, sample_timestamps_sec: list = [2.0, 60.0]) -> tuple:
         """
-        Scans multiple timestamps from the video (e.g., start and ~1 minute in) 
-        to find the largest stable board rectangle, avoiding static intro cards.
+        Automatically detects the whiteboard/projection screen ROI.
         """
         if not self.video_path.exists():
             raise FileNotFoundError(f"Video file not found: {self.video_path.resolve()}")
 
-        cap = cv2.VideoCapture(str(video_path := str(self.video_path)))
+        cap = cv2.VideoCapture(str(self.video_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
-            fps = 4.0  # Fallback to normalized default
+            fps = 4.0
 
         best_area = 0
         best_box = None
@@ -50,7 +49,6 @@ class BoardExtractor:
                 
                 if len(approx) == 4 and cv2.contourArea(c) > min_area:
                     area = cv2.contourArea(c)
-                    # We want the largest valid quadrilateral (often the main projector/board)
                     if area > best_area:
                         best_area = area
                         x, y, bw, bh = cv2.boundingRect(approx)
@@ -60,20 +58,77 @@ class BoardExtractor:
 
         if best_box is not None:
             self.roi_bbox = best_box
-            print(f"[+] Board automatically detected (multi-sample scan): {self.roi_bbox}")
             return self.roi_bbox
 
-        # Fallback to full frame bounds if no clear 4-point board contour is isolated
-        print("[!] No distinct board rectangle found across samples. Defaulting to full frame ROI.")
         self.roi_bbox = (0, 0, w_frame, h_frame)
         return self.roi_bbox
 
-    def crop_board(self, frame) -> np.ndarray:
+    def extract_keyframes(self, output_dir: str, stability_duration_sec: float = 3.0, pixel_change_threshold: float = 1.5) -> list:
         """
-        Crops an incoming video frame to the established board bounding box.
+        Scans the normalized video frame-by-frame, ignoring active writing motion,
+        and saves a snapshot of the entire screen only when the board settles 
+        for at least `stability_duration_sec`.
         """
         if self.roi_bbox is None:
             self.detect_board_automatically()
 
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        cap = cv2.VideoCapture(str(self.video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 4.0
+
         xmin, ymin, xmax, ymax = self.roi_bbox
-        return frame[ymin:ymax, xmin:xmax]
+        
+        saved_snapshots = []
+        prev_board_gray = None
+        stable_frame_count = 0
+        required_stable_frames = int(stability_duration_sec * fps)
+        
+        frame_idx = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # 1. Crop to the established static whiteboard ROI
+            board_roi = frame[ymin:ymax, xmin:xmax]
+            gray_roi = cv2.cvtColor(board_roi, cv2.COLOR_BGR2GRAY)
+            gray_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+
+            if prev_board_gray is not None:
+                # 2. Measure pixel difference between current frame and previous frame
+                diff = cv2.absdiff(prev_board_gray, gray_roi)
+                mean_change = np.mean(diff)
+
+                # If motion change is very low, the professor has stopped writing
+                if mean_change < pixel_change_threshold:
+                    stable_frame_count += 1
+                else:
+                    # Motion detected (writing, erasing, walking), reset timer
+                    stable_frame_count = 0
+
+                # 3. Trigger snapshot only when stability threshold is met
+                if stable_frame_count == required_stable_frames:
+                    timestamp_sec = frame_idx / fps
+                    minutes = int(timestamp_sec // 60)
+                    seconds = int(timestamp_sec % 60)
+                    
+                    filename = out_path / f"keyframe_{minutes:02d}m_{seconds:02d}s.jpg"
+                    
+                    # Save a snapshot of the full screen (or cropped board if preferred)
+                    cv2.imwrite(str(filename), frame)
+                    saved_snapshots.append(str(filename))
+                    print(f"[+] Board settled! Captured keyframe at [{minutes:02d}:{seconds:02d}] -> {filename.name}")
+                    
+                    # Reset counter so it doesn't snapshot every frame while remaining idle
+                    stable_frame_count = -int(10.0 * fps) # Cooldown guard: wait 10 seconds before next trigger
+
+            prev_board_gray = gray_roi
+            frame_idx += 1
+
+        cap.release()
+        print(f"[+] Feature Extraction Complete. Saved {len(saved_snapshots)} stable board keyframes.")
+        return saved_snapshots

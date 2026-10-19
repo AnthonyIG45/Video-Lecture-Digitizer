@@ -66,8 +66,8 @@ def run_pipeline(
 # Step 4: Establish Whiteboard Region of Interest (ROI) with multi-sample check
     print("\n[4/4] Establishing automatic whiteboard bounding box (scanning start & 1 min mark)...")
     extractor = BoardExtractor(video_path=str(norm_video_file))
-    # Samples at 2 seconds in and 60 seconds in to bypass title cards/intros
-    board_bounds = extractor.detect_board_automatically(sample_timestamps_sec=[2.0, 60.0])
+    # Samples at 2 seconds in and 120 seconds in to bypass title cards/intros
+    board_bounds = extractor.detect_board_automatically(sample_timestamps_sec=[2.0, 120.0])
     print(f"    - Active Board ROI Coordinates (xmin, ymin, xmax, ymax): {board_bounds}")
 
     print("\n" + "=" * 60)
@@ -77,11 +77,30 @@ def run_pipeline(
     print(f"    - Normalized Video:  {norm_video_file.resolve()}")
     print("=" * 60)
 
+    print("\n[5/5] Scanning video for stable board states & extracting keyframes...")
+    keyframe_dir = Path("data/processed/keyframes") / stem
+    extractor.extract_keyframes(
+        output_dir=str(keyframe_dir),
+        stability_duration_sec=3.0,     # Must remain still for 3 seconds
+        pixel_change_threshold=1.5      # Sensitivity filter for minor noise vs writing
+    )
+
 
 if __name__ == "__main__":
     # Point directly to your raw video file
+    """
     SOURCE_VIDEO = "data/raw/math15300_lecture.mp4"
 
+    run_pipeline(
+        raw_video_path=SOURCE_VIDEO,
+        target_fps=4,
+        whisper_model="base",
+        pause_threshold=0.7
+    )
+    """
+
+    SOURCE_VIDEO = "data/raw/frac_exponent_ex_3.mp4"
+    
     run_pipeline(
         raw_video_path=SOURCE_VIDEO,
         target_fps=4,
