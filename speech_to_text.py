@@ -154,30 +154,59 @@ class LectureTranscriber:
 
         return paragraphs
 
-    def export_transcripts(self, paragraphs, output_dir, file_stem: str):
+    def export_transcripts(self, paragraphs, output_dir, file_stem: str, keyframes_dir: str = None):
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         txt_file = out_dir / f"{file_stem}_transcript.txt"
         md_file = out_dir / f"{file_stem}_transcript.md"
 
+        # Index available keyframes by their exact timestamp in seconds
+        keyframe_map = {}
+        if keyframes_dir and Path(keyframes_dir).exists():
+            for kf_path in Path(keyframes_dir).glob("keyframe_*m_*s.jpg"):
+                # Parse minutes and seconds from filename e.g. 'keyframe_02m_43s.jpg'
+                name = kf_path.stem
+                try:
+                    parts = name.replace("keyframe_", "").split("m_")
+                    mins = int(parts[0])
+                    secs = int(parts[1].replace("s", ""))
+                    total_sec = (mins * 60) + secs
+                    keyframe_map[total_sec] = kf_path.resolve()
+                except (IndexError, ValueError):
+                    continue
+
         # Plain text export with speaker labels
         with open(txt_file, "w", encoding="utf-8") as f:
             for p in paragraphs:
                 f.write(f"[{p['speaker']}] {p['text']}\n\n")
 
-        # Formatted Markdown export with visual callouts for student Q&A
+        # Formatted Markdown Storyboard export combining audio & visual snapshots
         with open(md_file, "w", encoding="utf-8") as f:
-            f.write(f"# Lecture Transcript: {file_stem}\n\n---\n\n")
+            f.write(f"# Lecture Storyboard: {file_stem}\n\n---\n\n")
+            
             for p in paragraphs:
                 ts = f"**[{self._format_timestamp(p['start'])} - {self._format_timestamp(p['end'])}]**"
+                
+                # Write transcript block with speaker tag
                 if "Student" in p["speaker"]:
                     f.write(f"{ts} 🎙️ *[Student Q&A]*:\n> {p['text']}\n\n")
                 else:
                     f.write(f"{ts} **[Professor]**:\n{p['text']}\n\n")
 
-        print(f"[+] Transcripts saved successfully:")
-        print(f"    - Plaintext: {txt_file.resolve()}")
-        print(f"    - Markdown:  {md_file.resolve()}")
+                # Check if a board keyframe falls inside or near this paragraph's time window
+                # (We check if any keyframe timestamp sits between paragraph start and end + 5s buffer)
+                for kf_sec, kf_path in sorted(keyframe_map.items()):
+                    if p["start"] <= kf_sec <= (p["end"] + 5.0):
+                        rel_path = os.path.relpath(kf_path, out_dir.parent)
+                        f.write(f"\n> 🖼️ **Board Snapshot Captured at {self._format_timestamp(kf_sec)}:**\n")
+                        f.write(f"> ![{kf_path.stem}]({rel_path.replace(os.sep, '/')})\n\n")
+                        # Remove mapped keyframe so it doesn't duplicate in subsequent paragraphs
+                        del keyframe_map[kf_sec]
+                        break
+
+        print(f"[+] Storyboard & transcripts saved successfully:")
+        print(f"    - Markdown Storyboard: {md_file.resolve()}")
+        print(f"    - Plaintext:           {txt_file.resolve()}")
 
         return txt_file, md_file

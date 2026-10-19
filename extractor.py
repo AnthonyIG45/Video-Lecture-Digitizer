@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 
 class BoardExtractor:
-    """Handles automatic whiteboard region-of-interest (ROI) detection and motion-settled keyframe extraction."""
+    """Handles automatic whiteboard region-of-interest (ROI) detection, motion-settled keyframe extraction, and SSIM deduplication."""
 
     def __init__(self, video_path: str):
         self.video_path = Path(video_path)
@@ -63,11 +63,36 @@ class BoardExtractor:
         self.roi_bbox = (0, 0, w_frame, h_frame)
         return self.roi_bbox
 
-    def extract_keyframes(self, output_dir: str, stability_duration_sec: float = 3.0, pixel_change_threshold: float = 1.5) -> list:
+    @staticmethod
+    def _calculate_ssim(img1, img2) -> float:
         """
-        Scans the normalized video frame-by-frame, ignoring active writing motion,
-        and saves a snapshot of the entire screen only when the board settles 
-        for at least `stability_duration_sec`.
+        Computes normalized cross-correlation similarity between two frames (0.0 to 1.0).
+        1.0 means identical, 0.0 means completely unrelated.
+        """
+        g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        
+        # Resize to a standard low-res grid for fast, robust comparison
+        g1 = cv2.resize(g1, (256, 256))
+        g2 = cv2.resize(g2, (256, 256))
+
+        # Use normalized cross-correlation
+        res = cv2.matchTemplate(g1, g2, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        
+        # max_val ranges from -1.0 to 1.0; clamp to 0.0 to 1.0
+        return float(max(0.0, max_val))
+
+    def extract_keyframes(
+        self, 
+        output_dir: str, 
+        stability_duration_sec: float = 3.0, 
+        pixel_change_threshold: float = 1.5,
+        ssim_redundancy_threshold: float = 0.95
+    ) -> list:
+        """
+        Scans video for stable board states, filtering out redundant snapshots 
+        via structural similarity (SSIM) comparison against the last saved frame.
         """
         if self.roi_bbox is None:
             self.detect_board_automatically()
@@ -83,6 +108,7 @@ class BoardExtractor:
         xmin, ymin, xmax, ymax = self.roi_bbox
         
         saved_snapshots = []
+        last_saved_frame = None
         prev_board_gray = None
         stable_frame_count = 0
         required_stable_frames = int(stability_duration_sec * fps)
@@ -93,42 +119,45 @@ class BoardExtractor:
             if not ret:
                 break
 
-            # 1. Crop to the established static whiteboard ROI
             board_roi = frame[ymin:ymax, xmin:xmax]
             gray_roi = cv2.cvtColor(board_roi, cv2.COLOR_BGR2GRAY)
             gray_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
 
             if prev_board_gray is not None:
-                # 2. Measure pixel difference between current frame and previous frame
                 diff = cv2.absdiff(prev_board_gray, gray_roi)
                 mean_change = np.mean(diff)
 
-                # If motion change is very low, the professor has stopped writing
                 if mean_change < pixel_change_threshold:
                     stable_frame_count += 1
                 else:
-                    # Motion detected (writing, erasing, walking), reset timer
                     stable_frame_count = 0
 
-                # 3. Trigger snapshot only when stability threshold is met
                 if stable_frame_count == required_stable_frames:
-                    timestamp_sec = frame_idx / fps
-                    minutes = int(timestamp_sec // 60)
-                    seconds = int(timestamp_sec % 60)
-                    
-                    filename = out_path / f"keyframe_{minutes:02d}m_{seconds:02d}s.jpg"
-                    
-                    # Save a snapshot of the full screen (or cropped board if preferred)
-                    cv2.imwrite(str(filename), frame)
-                    saved_snapshots.append(str(filename))
-                    print(f"[+] Board settled! Captured keyframe at [{minutes:02d}:{seconds:02d}] -> {filename.name}")
-                    
-                    # Reset counter so it doesn't snapshot every frame while remaining idle
-                    stable_frame_count = -int(10.0 * fps) # Cooldown guard: wait 10 seconds before next trigger
+                    # Check SSIM redundancy against the last successfully saved keyframe
+                    is_redundant = False
+                    if last_saved_frame is not None:
+                        similarity = self._calculate_ssim(last_saved_frame, frame)
+                        if similarity >= ssim_redundancy_threshold:
+                            is_redundant = True
+
+                    if not is_redundant:
+                        timestamp_sec = frame_idx / fps
+                        minutes = int(timestamp_sec // 60)
+                        seconds = int(timestamp_sec % 60)
+                        
+                        filename = out_path / f"keyframe_{minutes:02d}m_{seconds:02d}s.jpg"
+                        cv2.imwrite(str(filename), frame)
+                        saved_snapshots.append(str(filename))
+                        last_saved_frame = frame.copy()
+                        print(f"[+] Unique board state captured at [{minutes:02d}:{seconds:02d}] -> {filename.name}")
+                    else:
+                        print(f"[-] Skipping redundant board state at frame {frame_idx}")
+
+                    stable_frame_count = -int(10.0 * fps) # 10-second cooldown guard
 
             prev_board_gray = gray_roi
             frame_idx += 1
 
         cap.release()
-        print(f"[+] Feature Extraction Complete. Saved {len(saved_snapshots)} stable board keyframes.")
+        print(f"[+] Deduplication Complete. Retained {len(saved_snapshots)} distinct keyframes.")
         return saved_snapshots
