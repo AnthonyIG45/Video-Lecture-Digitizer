@@ -72,9 +72,7 @@ def run_pipeline(
     
     saved_keyframes = extractor.extract_keyframes(
         output_dir=str(keyframe_dir),
-        stability_duration_sec=3.0,
-        pixel_change_threshold=1.5,
-        ssim_redundancy_threshold=0.95
+        stability_duration_sec=3.0
     )
 
     # Step 3: Split each keyframe into line blocks and OCR them (Pix2Text)

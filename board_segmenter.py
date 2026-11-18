@@ -5,6 +5,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ink import ink_mask
+
 
 @dataclass
 class Block:
@@ -48,17 +50,6 @@ class BoardSegmenter:
         if len(rows) == 0 or len(cols) == 0:
             return 0, 0, gray.shape[1], gray.shape[0]
         return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
-
-    def _ink_mask(self, gray: np.ndarray) -> np.ndarray:
-        """Binary mask (255 = ink) that is robust to uneven lighting and to chalk-on-dark boards."""
-        if np.median(gray) < 110:
-            gray = 255 - gray
-
-        # Divide by a heavily blurred copy to flatten the background to ~255
-        sigma = max(gray.shape) / 30
-        background = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma)
-        flat = cv2.divide(gray, background, scale=255)
-        return np.where(flat < self.ink_threshold, 255, 0).astype(np.uint8)
 
     def _clean_ink(self, ink: np.ndarray) -> np.ndarray:
         """Drops specks, edge ink and long thin lines (scrollbars, dividers)."""
@@ -177,7 +168,7 @@ class BoardSegmenter:
         gray = gray_full[oy1:oy2, ox1:ox2]
         h, w = gray.shape
 
-        ink = self._clean_ink(self._ink_mask(gray))
+        ink = self._clean_ink(ink_mask(gray, self.ink_threshold))
         min_gap_x = max(3, int(w * self.min_gap_x_frac))
         min_gap_y = max(3, int(h * self.min_gap_y_frac))
 

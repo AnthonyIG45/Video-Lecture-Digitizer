@@ -55,6 +55,7 @@ def _normalize_latex(latex: str) -> list:
     latex = re.sub(r"\\hspace\{[^}]*\}", " ", latex)
     latex = re.sub(r"\\q?quad", " ", latex)
     latex = re.sub(r"\\(?:underbrace|boxed|fbox|underbar)", "", latex)    # keep the content, drop the wrapper
+    latex = re.sub(r"\\(?:display|text|script|scriptscript)style", "", latex)  # style switches are unsupported
     latex = re.sub(r"\\(?:begin|end)\{[a-zA-Z*]+\}", "", latex)           # matrix/aligned environments
 
     lines = [part.replace("&", " ").strip() for part in latex.split("\\\\")]
@@ -81,13 +82,22 @@ def _render_math(latex: str, max_width: float):
     return Image(buf, width=width, height=height, hAlign="LEFT")
 
 
+def _is_garbled_prose(prose: str) -> bool:
+    """OCR that mistook handwriting for math leaks LaTeX syntax into plain text; real prose has none."""
+    return bool(re.search(r"\\[a-zA-Z]+|[{}^_]", prose))
+
+
 def _ocr_flowables(text: str, styles: dict, max_width: float) -> list:
-    """Converts OCR output (prose with $$...$$ display formulas) into flowables."""
+    """
+    Converts OCR output (prose with $$...$$ display formulas) into flowables. Anything that is
+    clearly broken (LaTeX leaking into prose, formulas that cannot be typeset) is left out; the
+    board snapshot above it always shows the real content.
+    """
     flowables = []
     for i, segment in enumerate(_DISPLAY_MATH.split(text)):
         if i % 2 == 0:  # prose; inline $..$ is shown as plain text
             prose = " ".join(segment.replace("$", "").split())
-            if prose:
+            if prose and not _is_garbled_prose(prose):
                 flowables.append(Paragraph(escape(prose), styles["body"]))
             continue
 
@@ -95,8 +105,6 @@ def _ocr_flowables(text: str, styles: dict, max_width: float) -> list:
             rendered = _render_math(formula, max_width)
             if rendered is not None:
                 flowables += [rendered, Spacer(1, 4)]
-            else:
-                flowables.append(Paragraph(escape(formula), styles["mono"]))
     return flowables
 
 
@@ -114,11 +122,13 @@ def _snapshot_flowables(snapshot: dict, base_dir: Path, styles: dict, frame_w: f
 
     flowables = [KeepTogether(head)]  # never leave the caption stranded away from its image
 
-    ocr_text = [b["text"] for b in snapshot.get("blocks", []) if b.get("text")]
-    if ocr_text:
+    ocr_flowables = []
+    for block in snapshot.get("blocks", []):
+        if block.get("text"):
+            ocr_flowables += _ocr_flowables(block["text"], styles, frame_w)
+    if ocr_flowables:
         flowables.append(Paragraph("Board text (OCR)", styles["label"]))
-        for text in ocr_text:
-            flowables += _ocr_flowables(text, styles, frame_w)
+        flowables += ocr_flowables
     return flowables
 
 
