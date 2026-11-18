@@ -5,26 +5,20 @@
 [![Framework](https://img.shields.io/badge/Architecture-Modular%20Pipeline-brightgreen.svg)]()
 
 > **Senior Capstone Proof-of-Concept**  
-> An automated pipeline that transforms raw chalk/whiteboard lecture recordings into an interactive, indexed mathematical storyboard. By decoupling visual stroke stabilization from speech transcription, SynchroBoard isolates newly written formulas, transcribes spoken explanations, and synchronizes math notation with timestamped lecture playback.
+> An automated pipeline that turns a recorded chalk/whiteboard lecture into a study PDF. Give it a video file or a YouTube link; it transcribes the speech, captures each new state of the board, reads the writing on it, and lays all of it out in time order.
 
 ---
 
 ## 📑 Table of Contents
-- [Problem Overview](#problem-overview)
-- [System Architecture](#system-architecture)
-- [Core Pipeline Modules](#core-pipeline-modules)
-  - [1. Visual Extraction & Stroke Stability](#1-visual-extraction--stroke-stability)
-  - [2. Audio Processing & Phoneme Alignment](#2-audio-processing--phoneme-alignment)
-  - [3. Graphic Recognition & LaTeX Transduction](#3-graphic-recognition--latex-transduction)
-  - [4. Multimodal Temporal Synchronization Engine](#4-multimodal-temporal-synchronization-engine)
-  - [5. Interactive Frontend (HCI)](#5-interactive-frontend-hci)
-- [Project Directory Structure](#project-directory-structure)
-- [Installation & Setup](#installation--setup)
-- [Usage & Pipeline Execution](#usage--pipeline-execution)
-- [Configuration Reference](#configuration-reference)
-- [Verification & Quality Control](#verification--quality-control)
-- [Roadmap & Milestone Tracking](#roadmap--milestone-tracking)
-- [License & Acknowledgments](#license--acknowledgments)
+- [Problem Overview](#-problem-overview)
+- [How It Works](#-how-it-works)
+- [Project Structure](#-project-structure)
+- [Installation & Setup](#-installation--setup)
+- [Usage](#-usage)
+- [Privacy & Storage](#-privacy--storage)
+- [Known Limitations](#-known-limitations)
+- [Roadmap](#-roadmap)
+- [License](#-license)
 
 ---
 
@@ -35,113 +29,75 @@ STEM lecture videos present a dual-modality cognitive load: students struggle to
 2. **Stroke Instability:** Writing is an incremental process. Extracting video frames mid-stroke produces fragmented, unintelligible equations.
 3. **Temporal Lead/Lag Discrepancies:** Instructors rarely speak math symbols simultaneously with writing. Explanations either precede writing (prospective) or follow completion (retrospective).
 
-**SynchroBoard** solves these challenges by combining background subtraction and person masking with stroke stability buffers, neural LaTeX transduction, and asymmetric temporal alignment.
+**SynchroBoard** addresses these by capturing the board only when its writing has reached a new state (and, when the lecturer's hand never leaves the frame, by picking the clearest recent frame), segmenting each snapshot into lines, recognizing text and LaTeX per line, and placing every snapshot under the speech it accompanies.
 
 ---
 
-## 🏗 System Architecture
+## ⚙️ How It Works
 
 ```
-                    +------------------------------------+
-                    |     Raw Lecture Video (.mp4)       |
-                    +------------------------------------+
-                                      |
-                  +-------------------+-------------------+
-                  |                                       |
-                  v                                       v
-        [ 1. Video Pipeline ]                   [ 2. Audio Pipeline ]
-       • Background subtraction                • Audio track extraction (ffmpeg)
-       • Lecturer occlusion mask (MediaPipe)   • Whisper / WhisperX transcription
-       • Edge/Stroke stability buffer          • Word/Phoneme-level timestamps
-                  |                                       |
-                  v                                       |
-      [ 3. Graphic Recognition ]                          |
-       • Patch classification (3-Way)                     |
-         (Formula vs. Diagram vs. Text)                   |
-       • LaTeX-OCR transduction (pix2tex)                 |
-       • Syntax confidence gate (SymPy)                   |
-                  |                                       |
-                  +-------------------+-------------------+
-                                      |
-                                      v
-                      [ 4. Synchronization Engine ]
-                       • Asymmetric temporal window clustering
-                       • Perceptual hashing (pHash) deduplication
-                                      |
-                                      v
-                       [ 5. Interactive UI (HCI) ]
-                        • Bidirectional synchronized playback
-                        • Searchable KaTeX math index
-                        • Clickable derivation storyboard
+        Video file or link (yt-dlp)
+                    |
+      +-------------+--------------+
+      v                            v
+ 16 kHz mono audio            4 fps normalized video
+      |                            |
+      v                            v
+ Whisper transcription       Keyframe extraction (ink-based)
+ (word timestamps,           - board changes judged on the ink
+  pause-based paragraphs)      mask, not raw pixels
+      |                      - "settled" trigger + "progress"
+      |                        trigger for hand-in-frame video
+      |                            |
+      |                            v
+      |                      Block segmentation (OpenCV XY-cut)
+      |                            |
+      |                            v
+      |                      Pix2Text OCR: prose + LaTeX
+      |                            |
+      +-------------+--------------+
+                    v
+             storyboard.json          <-- the only hand-off
+                    |
+         +----------+-----------+
+         v                      v
+   pdf_builder.py        app.py (Streamlit)
 ```
 
----
+1. **Audio:** FFmpeg (bundled through `imageio-ffmpeg`) extracts 16 kHz mono audio; `openai-whisper` produces word-level timestamps that are grouped into paragraphs at pauses.
+2. **Keyframes** (`extractor.py`, `ink.py`): the board region is analyzed as an ink mask that is robust to lighting flicker and noise. A snapshot is saved when the ink has stayed unchanged for 3 s, or, if the writing never settles, when 20 s have passed and the board has changed by at least 10%. In the latter case the least-occluded recent frame (smallest hand/pen blob) is used. Blank boards and unchanged states are skipped.
+3. **Segmentation** (`board_segmenter.py`): classical OpenCV only. Ink is binarized, UI chrome and clipped edge fragments are dropped, and a recursive XY-cut splits the board at whitespace gaps into line-level blocks; stacked fractions are re-joined.
+4. **OCR** (`block_ocr.py`): Pix2Text reads each block as mixed prose and LaTeX, then number-spacing artifacts are cleaned up.
+5. **Storyboard** (`storyboard.py`): every keyframe is placed under the latest transcript paragraph that started at or before it, and everything is written to `storyboard.json`.
+6. **PDF** (`pdf_builder.py`): ReportLab layout with the transcript, the board snapshot, and the OCR text with formulas typeset. Text that is clearly broken is left out; the snapshot always shows the real board.
 
-## 🔬 Core Pipeline Modules
-
-### 1. Visual Extraction & Stroke Stability
-* **Lecturer Occlusion Masking:** Uses MediaPipe Pose / Selfie Segmentation to generate a real-time binary mask over the instructor, restricting analysis purely to the exposed board area.
-* **MOG2 Adaptive Background Modeling:** Tracks persistent stroke additions while filtering out high-frequency illumination flicker and minor sensor noise.
-* **Temporal Stability Accumulator:** A region of interest (ROI) is flagged as an active stroke event only when its Canny/Sobel gradient variance remains below an $\epsilon$-threshold for $>2.5$ seconds following occlusion clearance.
-
-### 2. Audio Processing & Phoneme Alignment
-* **Track Extraction:** Native Demuxing using FFmpeg to high-fidelity 16kHz mono WAV.
-* **Transcription & Alignment:** Utilizes `whisperx` (Whisper backbone + wav2vec 2.0 forced alignment) to generate word-level timestamp boundaries ($[t_{\text{start}}, t_{\text{end}}]$).
-* **Segment Boundary Parsing:** Assembles words into coherent utterance units while preserving sub-second token boundaries.
-
-### 3. Graphic Recognition & LaTeX Transduction
-* **3-Way Region Classifier:** Distinguishes between standalone mathematical expressions, freeform diagrams, and running blackboard text using stroke density and aspect ratio features (MobileNetV3 backbone).
-* **LaTeX-OCR Transduction:** Formula crops pass to `pix2tex` for sequence-to-sequence visual-to-LaTeX token generation.
-* **Syntactic Confidence Gate:** Transduced LaTeX strings are evaluated inside a `sympy.parsing.latex` boundary. Ill-formed derivations are caught and either fall back to raw crops or trigger confidence penalties without breaking pipeline state.
-
-### 4. Multimodal Temporal Synchronization Engine
-* **Perceptual Deduplication:** Stable crops are hashed via `imagehash.phash`. Hamming distances ($\Delta_{\text{hash}} < 8\text{ bits}$) are clustered to prevent repeated registrations of static formulas.
-* **Asymmetric Temporal Windowing:** Maps visual completion timestamps ($t_{\text{visual}}$) to speech chunks across an asymmetric boundary:
-  $$\mathcal{W}(t_{\text{visual}}) = [t_{\text{visual}} - \Delta t_{\text{lead}},\; t_{\text{visual}} + \Delta t_{\text{lag}}]$$
-  *(Default: $\Delta t_{\text{lead}} = 3.0\text{s}$, $\Delta t_{\text{lag}} = 10.0\text{s}$).*
-
-### 5. Interactive UI (HCI)
-* Built using a responsive frontend architecture (Streamlit / Vite-React + HTML5 video control API).
-* Interactive storyboard cards containing the raw crop, rendered KaTeX equation, and synchronized transcript.
-* Bidirectional seeking: Clicking any formula instantly seeks the video to the teacher's explanation.
+The PDF builder and the UI know nothing about the processing pipeline. They only read `storyboard.json` (layout documented in [storyboard.py](storyboard.py)), so either can be replaced independently.
 
 ---
 
-## 📂 Project Directory Structure
+## 📂 Project Structure
 
 ```plaintext
-synchroboard/
-├── data/
-│   ├── raw/                  # Input lecture videos (.mp4)
-│   ├── processed/            # Cropped board regions & audio tracks
-│   └── output/               # Output JSON storyboards and LaTeX dumps
-├── configs/
-│   └── pipeline_config.yaml  # Thresholds, model weights, and temporal windows
-├── src/
-│   ├── video/
-│   │   ├── segmenter.py      # MediaPipe occlusion masking
-│   │   ├── stability.py      # Temporal stroke buffer & MOG2 subtraction
-│   │   └── cropper.py        # Contour discovery & bounding box normalization
-│   ├── audio/
-│   │   ├── extractor.py      # FFmpeg demuxing wrappers
-│   │   └── transcriber.py    # WhisperX pipeline & forced alignment
-│   ├── recognition/
-│   │   ├── classifier.py     # 3-way patch classification (Formula/Diagram/Text)
-│   │   ├── latex_ocr.py      # pix2tex inference wrapper
-│   │   └── verifier.py       # SymPy syntax confidence gate
-│   ├── sync/
-│   │   ├── deduplicator.py   # pHash Hamming clustering
-│   │   └── aligner.py        # Temporal window audio-visual matcher
-│   └── ui/
-│       ├── app.py            # Streamlit / Web UI entrypoint
-│       └── components/       # Custom video player & KaTeX renderers
-├── tests/
-│   ├── test_stability.py
-│   ├── test_latex_parser.py
-│   └── test_sync_window.py
+Video-Lecture-Digitizer/
+├── app.py               # Streamlit UI: upload a file or paste a link, get a PDF
+├── main.py              # run_pipeline(): video -> storyboard.json (also runnable directly)
+├── video_source.py      # Saves an upload or downloads a link (yt-dlp) to a local file
+├── video_processor.py   # FFmpeg: audio extraction and 4 fps normalization
+├── extractor.py         # Board ROI detection and ink-based keyframe extraction
+├── ink.py               # Shared ink-mask / background-flattening helpers
+├── board_segmenter.py   # Keyframe -> line-level blocks (XY-cut)
+├── block_ocr.py         # Pix2Text text + LaTeX recognition per block
+├── speech_to_text.py    # Whisper transcription and Markdown storyboard export
+├── storyboard.py        # storyboard.json contract, keyframe placement
+├── pdf_builder.py       # storyboard.json -> PDF
+├── workspace.py         # Per-instance temporary storage that is deleted on exit
+├── run_segmenter.py     # Dev helper: segment a processed keyframe folder
+├── run_ocr.py           # Dev helper: OCR a segmented keyframe folder
+├── .streamlit/config.toml
 ├── requirements.txt
-├── Makefile
-└── README.md
+└── data/
+    ├── raw/             # Source videos used for command-line runs
+    └── processed/       # Command-line outputs (git-ignored)
 ```
 
 ---
@@ -149,106 +105,84 @@ synchroboard/
 ## ⚡ Installation & Setup
 
 ### Prerequisites
-* Python 3.10 or higher
-* FFmpeg (must be available on system `$PATH`)
-* CUDA-capable GPU (recommended for WhisperX and pix2tex inference)
+* Python 3.10 or higher (developed on 3.11)
+* No separate FFmpeg install is needed; a copy is bundled through `imageio-ffmpeg`
+* CPU is enough. A GPU is not required
 
-### Setup Instructions
+### Setup
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/your-username/synchroboard.git
-cd synchroboard
+# 1. Clone
+git clone https://github.com/AnthonyIG45/Video-Lecture-Digitizer.git
+cd Video-Lecture-Digitizer
 
-# 2. Initialize virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+# 2. Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate      # On Windows: .\.venv\Scripts\activate
 
-# 3. Install core dependencies
-pip install --upgrade pip
+# 3. Install dependencies (CPU build of PyTorch is pulled from the PyTorch index)
 pip install -r requirements.txt
-
-# 4. Install system binaries (Ubuntu/Debian)
-sudo apt-get update && sudo apt-get install -y ffmpeg
-
-# 4. (Alternative: Windows via Scoop / Chocolatey)
-# choco install ffmpeg
 ```
+
+The first run downloads model weights (Whisper from OpenAI, Pix2Text from Hugging Face), roughly a few hundred MB in total. These are cached for later runs.
+
+`rapidocr` and `onnxruntime` are pinned in `requirements.txt` on purpose: newer versions break Pix2Text's imports alongside PyTorch 2.4.1.
 
 ---
 
-## 🚀 Usage & Pipeline Execution
+## 🚀 Usage
 
-### Running the End-to-End Pipeline
-Execute the full extraction and alignment pipeline on a raw recording:
+### Web app
 
 ```bash
-python -m src.sync.aligner \
-    --video-path data/raw/calculus_lecture_sample.mp4 \
-    --config configs/pipeline_config.yaml \
-    --output-dir data/output/run_01
+streamlit run app.py
 ```
 
-### Launching the Interactive Interface
-Once alignment metadata is generated, run the visualization storyboard:
+Choose **Upload a file** or **Paste a link** (YouTube and other sites supported by yt-dlp; single videos up to 60 minutes), pick a Whisper model size, and press **Generate PDF**. A short lecture takes a few minutes on CPU (about 2 to 3 minutes for a 4-minute video in testing; OCR and Whisper dominate).
+
+### Command line
+
+Set `SOURCE_VIDEO` at the bottom of `main.py` and run:
 
 ```bash
-streamlit run src/ui/app.py -- --manifest data/output/run_01/storyboard.json
+python main.py
+```
+
+This writes intermediate files under `data/processed/` and a `storyboard.json` under `data/processed/storyboards/`. Build a PDF from it with:
+
+```python
+from pdf_builder import build_pdf
+build_pdf("data/processed/storyboards/<video-name>.json")
 ```
 
 ---
 
-## ⚙️ Configuration Reference (`pipeline_config.yaml`)
+## 🔒 Privacy & Storage
 
-```yaml
-video:
-  sample_fps: 5
-  stability_duration_sec: 2.5
-  canny_threshold_low: 50
-  canny_threshold_high: 150
-  min_contour_area: 1200
-
-audio:
-  model_size: "medium"
-  compute_type: "float16"
-  batch_size: 8
-
-recognition:
-  confidence_threshold: 0.82
-  enforce_sympy_verification: true
-
-sync:
-  lead_window_sec: 3.0
-  lag_window_sec: 10.0
-  phash_hamming_threshold: 8
-```
+The web app keeps nothing from your video on disk. Each run works in a temporary folder that is deleted as soon as the PDF is built, and every instance's working directory is removed when the app exits (leftovers from a hard-killed instance are swept on the next start). The finished PDF lives in memory for the download button only. Only model weights are cached between runs.
 
 ---
 
-## 🧪 Verification & Quality Control
+## ⚠️ Known Limitations
 
-Unit and integration tests validate the stroke stability detector and LaTeX syntax verifier:
-
-```bash
-# Run test suite
-pytest tests/ -v
-
-# Run syntax gate sanity checks
-python -m tests.test_latex_parser
-```
+* **Handwritten prose** is often misread, and clipped lines at the edge of the frame are garbled. Handwritten formulas are much better, and the board image is always included in the PDF.
+* **Figures are not detected.** Diagrams and graphs appear in the board snapshot, but are not cropped out or described, and the OCR silently skips them.
+* **Capture heuristics** are tuned on a few videos. When a hand covers the board for long stretches, a snapshot may still include it, and a snapshot can catch a page mid-flip.
+* **Speaker labels** come from a simple loudness heuristic and are unreliable; the PDF only shows a label when the speaker differs from the dominant one.
+* **Board detection** falls back to the full frame when no clear rectangular board is found (typical for screen recordings and close-up paper shots).
 
 ---
 
-## 🗺 Roadmap & Milestone Tracking
+## 🗺 Roadmap
 
 - [x] **Milestone 1: Pipeline Specification & Feasibility Audit**
-  - Architecture blueprinting and multimodal pipeline mapping.
-- [ ] **Milestone 2: Video Extraction & Stroke Stability PoC**
-  - MediaPipe person segmentation + MOG2 temporal variance stabilization.
-- [ ] **Milestone 3: Transduction & Audio-Visual Alignment**
-  - WhisperX phoneme timestamp integration and `pix2tex` LaTeX OCR extraction.
-- [ ] **Milestone 4: Synchronized Storyboard UI**
-  - Bidirectional video-to-formula player in Streamlit with KaTeX rendering.
+- [x] **Milestone 2: Video Extraction & Keyframe Capture PoC**
+  - Ink-based stability detection and hand-aware progress snapshots (replaced the originally planned MediaPipe/MOG2 approach).
+- [x] **Milestone 3: Transcription, OCR & Alignment**
+  - Whisper word timestamps, line segmentation, Pix2Text LaTeX OCR, keyframe-to-speech placement.
+- [x] **Milestone 4: Study PDF & Web UI**
+  - Streamlit front end with upload/link input; PDF generated from a decoupled `storyboard.json`.
+- [ ] **Future work:** figure detection and cropping, SymPy validation of OCR'd LaTeX, perceptual-hash deduplication, lecturer masking, bidirectional video seeking.
 
 ---
 
