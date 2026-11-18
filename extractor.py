@@ -105,8 +105,16 @@ class BoardExtractor:
         if fps <= 0:
             fps = 4.0
 
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Clamp ROI to the frame; fall back to the full frame if it ends up empty
         xmin, ymin, xmax, ymax = self.roi_bbox
-        
+        xmin, xmax = max(0, xmin), min(frame_w, xmax)
+        ymin, ymax = max(0, ymin), min(frame_h, ymax)
+        if xmax <= xmin or ymax <= ymin:
+            xmin, ymin, xmax, ymax = 0, 0, frame_w, frame_h
+
         saved_snapshots = []
         last_saved_frame = None
         prev_board_gray = None
@@ -136,7 +144,7 @@ class BoardExtractor:
                     # Check SSIM redundancy against the last successfully saved keyframe
                     is_redundant = False
                     if last_saved_frame is not None:
-                        similarity = self._calculate_ssim(last_saved_frame, frame)
+                        similarity = self._calculate_ssim(last_saved_frame, board_roi)
                         if similarity >= ssim_redundancy_threshold:
                             is_redundant = True
 
@@ -146,9 +154,9 @@ class BoardExtractor:
                         seconds = int(timestamp_sec % 60)
                         
                         filename = out_path / f"keyframe_{minutes:02d}m_{seconds:02d}s.jpg"
-                        cv2.imwrite(str(filename), frame)
+                        cv2.imwrite(str(filename), board_roi, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         saved_snapshots.append(str(filename))
-                        last_saved_frame = frame.copy()
+                        last_saved_frame = board_roi.copy()
                         print(f"[+] Unique board state captured at [{minutes:02d}:{seconds:02d}] -> {filename.name}")
                     else:
                         print(f"[-] Skipping redundant board state at frame {frame_idx}")

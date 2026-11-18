@@ -1,0 +1,3 @@
+[server]
+# Lecture videos are large; Streamlit's default upload limit is 200 MB
+maxUploadSize = 1024

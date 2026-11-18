@@ -1,9 +1,12 @@
+import json
 import os
 import shutil
 import wave
 from pathlib import Path
 import numpy as np
 import imageio_ffmpeg
+
+from storyboard import index_keyframes, place_keyframes
 
 # Ensure ffmpeg binary is resolved for Whisper
 ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -154,7 +157,7 @@ class LectureTranscriber:
 
         return paragraphs
 
-    def export_transcripts(self, paragraphs, output_dir, file_stem: str, keyframes_dir: str = None):
+    def export_transcripts(self, paragraphs, output_dir, file_stem: str, keyframes_dir: str = None, blocks_dir: str = None):
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -162,19 +165,7 @@ class LectureTranscriber:
         md_file = out_dir / f"{file_stem}_transcript.md"
 
         # Index available keyframes by their exact timestamp in seconds
-        keyframe_map = {}
-        if keyframes_dir and Path(keyframes_dir).exists():
-            for kf_path in Path(keyframes_dir).glob("keyframe_*m_*s.jpg"):
-                # Parse minutes and seconds from filename e.g. 'keyframe_02m_43s.jpg'
-                name = kf_path.stem
-                try:
-                    parts = name.replace("keyframe_", "").split("m_")
-                    mins = int(parts[0])
-                    secs = int(parts[1].replace("s", ""))
-                    total_sec = (mins * 60) + secs
-                    keyframe_map[total_sec] = kf_path.resolve()
-                except (IndexError, ValueError):
-                    continue
+        keyframe_map = index_keyframes(keyframes_dir)
 
         # Plain text export with speaker labels
         with open(txt_file, "w", encoding="utf-8") as f:
@@ -184,8 +175,10 @@ class LectureTranscriber:
         # Formatted Markdown Storyboard export combining audio & visual snapshots
         with open(md_file, "w", encoding="utf-8") as f:
             f.write(f"# Lecture Storyboard: {file_stem}\n\n---\n\n")
-            
-            for p in paragraphs:
+
+            keyframes_by_paragraph = place_keyframes(paragraphs, keyframe_map)
+
+            for para_idx, p in enumerate(paragraphs):
                 ts = f"**[{self._format_timestamp(p['start'])} - {self._format_timestamp(p['end'])}]**"
                 
                 # Write transcript block with speaker tag
@@ -194,16 +187,17 @@ class LectureTranscriber:
                 else:
                     f.write(f"{ts} **[Professor]**:\n{p['text']}\n\n")
 
-                # Check if a board keyframe falls inside or near this paragraph's time window
-                # (We check if any keyframe timestamp sits between paragraph start and end + 5s buffer)
-                for kf_sec, kf_path in sorted(keyframe_map.items()):
-                    if p["start"] <= kf_sec <= (p["end"] + 5.0):
-                        rel_path = os.path.relpath(kf_path, out_dir.parent)
-                        f.write(f"\n> 🖼️ **Board Snapshot Captured at {self._format_timestamp(kf_sec)}:**\n")
-                        f.write(f"> ![{kf_path.stem}]({rel_path.replace(os.sep, '/')})\n\n")
-                        # Remove mapped keyframe so it doesn't duplicate in subsequent paragraphs
-                        del keyframe_map[kf_sec]
-                        break
+                for kf_sec, kf_path in keyframes_by_paragraph.get(para_idx, []):
+                    rel_path = os.path.relpath(kf_path, out_dir.parent)
+                    f.write(f"\n> 🖼️ **Board Snapshot Captured at {self._format_timestamp(kf_sec)}:**\n")
+                    f.write(f"> ![{kf_path.stem}]({rel_path.replace(os.sep, '/')})\n\n")
+
+                    # Append the OCR'd board text for this snapshot, if block OCR was run
+                    blocks_json = Path(blocks_dir) / kf_path.stem / "blocks.json" if blocks_dir else None
+                    if blocks_json and blocks_json.exists():
+                        board_text = [b["text"] for b in json.loads(blocks_json.read_text(encoding="utf-8")) if b.get("text")]
+                        if board_text:
+                            f.write("**Board text (OCR):**\n\n" + "\n\n".join(board_text) + "\n\n")
 
         print(f"[+] Storyboard & transcripts saved successfully:")
         print(f"    - Markdown Storyboard: {md_file.resolve()}")
